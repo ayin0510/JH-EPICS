@@ -1,0 +1,436 @@
+---
+title: "RF_deathmodel"
+author: "Anna Yin"
+date: "`r Sys.Date()`"
+output: pdf_document
+
+---
+
+##Running Random Forest modeling on hospitalized data at day 0 (enrollment)
+```{r, loading your packages, message=FALSE, echo=FALSE, results=FALSE}
+## Load in your packages 
+install.packages("tidyverse")
+library(tidyverse) #  this package includes many of the commonly used packages (e.g., dplyr, ggplot2,tidyr)]
+options(repos = c(CRAN = "https://cran.rstudio.com")) 
+install.packages("pacman") # this package allows you to load several packages in one line 
+library(pacman)
+install.packages("pROC")
+install.packages("MLmetrics")
+install.packages("pdp")
+install.packages("ROCR")
+p_load(haven, tidyverse,Hmisc, ggpubr,rstatix, randomForest,caTools,varImp,caret,knitr,pROC, shiny, tidymodels,rmarkdown,tidyr, gridExtra, MLmetrics, pdp, ROCR)
+```
+
+##Read in clean dta file that only has day 0 data; one subject per row
+```{r, read wide dataset in}
+data1<- read_dta("/Users/ayin/Desktop/JH-EPICS/data/Fisher_grant_randomforest_intubation.dta")
+```
+
+```{r, setting up the dataset,  results=FALSE, message=FALSE, echo=FALSE}
+##View the variables in the dataset
+names(data1) 
+
+##drop the variables not needed for running the death model 
+data1 = data1[,-c(12,18, 19, 20, 21, 22, 23, 24, 25, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)]
+
+names(data1) 
+
+dim(data1) # dataset has 99 rows and 24 columns
+
+sapply(data1, class) # to look at how variables are coded (e.g. numeric or double or factor)
+
+#  transform variables to factor 
+data1 <- transform(data1,
+                   age=as.numeric(age),
+                   male=as.factor(male),
+                   death=as.factor(death), 
+                   bmi=as.numeric(bmi),
+                   race_ethnicity=as.factor(race_ethnicity),
+                   cancer=as.factor(cancer),
+                   cvd=as.factor(cvd),
+                   org_transplant=as.factor(org_transplant),
+                   pulmonary=as.factor(pulmonary),
+                   autoimmune=as.factor(autoimmune),
+                   diabetes=as.factor(diabetes)
+)
+
+sapply(data1, class) # to look at how variables are coded (e.g. numeric or double or factor)
+
+#get rid of na values
+data1 <- data1[!(data1$death %in% c(NA)),]
+colSums(is.na(data1))
+na.omit(data1) -> data1 
+#remove na rows; 98 rows of data for 24 variables
+```
+
+# This is the code for random forest (using OOB approach)
+```{r, running the RF}
+#default decision trees is 500 
+set.seed(1234) 
+Death <- randomForest(
+  death ~ . , 
+  data=data1, 
+  ntree=2000,
+ method="rf", 
+ importance=TRUE,
+  na.action = na.omit #there cannot be any NA values in any of the predictors 
+)
+print(Death) #use OOB error 
+varImpPlot(Death)
+imp <- varImpPlot(Death)
+
+confusionMatrix(Death$predicted, data1$death, positive="1")
+
+predictions <- predict(Death, data1)
+predicted_classes <- as.numeric(predictions)
+
+#Count class distribution
+class_distribution <- table(predicted_classes)
+
+#Display class distribution
+print(class_distribution)
+
+#Obtain out-of-bag (OOB) predictions
+oob_predictions_prob <- predict(Death, type = "prob", oob = TRUE)
+
+#Set custom cutoff; default is 0.5
+cutoff <- 0.21
+
+#Convert OOB probabilities to class labels using custom cutoff
+oob_predictions <- apply(oob_predictions_prob, 1, function(x) {
+  ifelse(x["1"] > cutoff, "1", "0")
+})
+
+#Convert class labels to factor for calculation
+oob_predictions <- factor(ifelse(oob_predictions == "1", "1", "0"))
+
+true_labels <- data1$death
+conf_matrix <- confusionMatrix(oob_predictions, true_labels, positive="1")
+conf_matrix
+
+F1_Score(oob_predictions,true_labels)
+
+```
+
+
+
+## RF model performance metrics
+```{r,   results=FALSE, message=FALSE, fig.show=FALSE}
+#error rate plots
+Death$err.rate[,1]
+par(mfrow = c(2,1))
+plot(Death$err.rate[,1], type = "l")
+```
+
+```{r, results=FALSE, message=FALSE}
+#model metrics 
+pred1=predict(Death,type = "prob")
+perf = prediction(pred1[,2], data1$death)
+hist(pred1[,2])
+```
+
+```{r, message=FALSE}
+#Area under curve
+performance( perf, 'auc' )
+auc = performance(perf, measure="auc")
+auc
+auc@y.values
+```
+
+```{r, results=FALSE, message=FALSE}
+#True Positive and Negative Rate
+pred3 = performance(perf, "tpr","fpr")
+
+#Plot the ROC curve, run the two lines of code together
+plot(pred3,main="ROC Curve for RF Death Model",col=2,lwd=2)
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+```
+
+
+##Partial and Bivariate dependence plot to visualize the relationship of variable(s) with outcome 
+```{r echo=FALSE, message=FALSE, warning=FALSE, results=FALSE, fig.keep="none"}
+# Single Variable
+partial_spike_c1q <- partial(Death, pred.var = c("spike_c1q_log10"),  chull = TRUE, type=c("classification"), prob=TRUE, which.class = "1")
+plot.spike_c1q <- autoplot(partial_spike_c1q, contour = TRUE, xlab="anti-Spike C1q (AU, log10)", ylab="Predicted Probability")
+plot.spike_c1q 
+
+# Single Variable
+partial_n_igg  <- partial(Death, pred.var = c("n_igg_bau_log10"), chull = TRUE, type = c("classification"), prob = TRUE, which.class = "1")
+plot.n_igg <- autoplot(partial_n_igg , contour = TRUE, xlab="anti-N-IgG (BAU/mL, log10)", ylab="Predicted Probability")
+plot.n_igg
+
+# Single Variable
+partial_spike_igg  <- partial(Death, pred.var = c("spike_igg_bau_log10"), chull = TRUE, type = c("classification"), prob = TRUE, which.class="1")
+plot.spike_igg <- autoplot(partial_spike_igg , contour = TRUE, xlab="anti-Spike-IgG (BAU/mL, log10)", ylab="Predicted Probability")
+plot.spike_igg
+
+# Single Variable
+partial_srbd_c1q <- partial(Death, pred.var = c("srbd_c1q_log10"), chull = TRUE, type = c("classification"), prob = TRUE, which.class="1")
+plot.srbd_c1q  <- autoplot(partial_srbd_c1q , contour = TRUE, xlab="anti-S-RBD C1q (AU, log10)", ylab="Predicted Probability")
+plot.srbd_c1q
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results=FALSE}
+grid.arrange(plot.spike_c1q , plot.n_igg , plot.srbd_c1q, plot.spike_igg)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results=FALSE, fig.keep="none"}
+##two variable 
+par.c1q_n_igg<- partial(Death, pred.var = c("spike_c1q_log10", "n_igg_bau_log10"), chull = TRUE,  type = c("classification"), prob = TRUE, which.class="1")
+plot.c1q_n_igg<- autoplot(par.c1q_n_igg, contour = TRUE, legend.title = "Pred Prob", xlab="anti-Spike C1q (AU, log10)", ylab="anti-N IgG (BAU/mL, log10)")
+plot.c1q_n_igg
+
+par.c1q_spike_igg<- partial(Death, pred.var = c("spike_c1q_log10", "spike_igg_bau_log10"), chull = TRUE,  type = c("classification"), prob = TRUE,  which.class="1")
+plot.c1q_spike_igg<- autoplot(par.c1q_spike_igg, contour = TRUE, legend.title = "Pred Prob", xlab="anti-Spike C1q (AU, log10)", ylab="anti-Spike IgG (BAU/mL, log10)")
+
+
+par.c1q_srbd_c1q <- partial(Death, pred.var = c("spike_c1q_log10", "srbd_c1q_log10"), chull = TRUE,  type = c("classification"), prob = TRUE,  which.class="1")
+plot.c1q_srbd_c1q <- autoplot(par.c1q_srbd_c1q, contour = TRUE, legend.title = "Pred Prob", xlab="anti-Spike C1q (AU, log10)", ylab="anti-S-RBD C1q (AU, log10)")
+
+par.spike_srbd_c1q <- partial(Death, pred.var = c("spike_igg_bau_log10", "srbd_c1q_log10"), chull = TRUE,  type = c("classification"), prob = TRUE,  which.class="1")
+plot.spike_srbd_c1q <- autoplot(par.spike_srbd_c1q, contour = TRUE, legend.title = "Pred Prob", xlab="anti-Spike IgG (BAU/mL, log10)", ylab="anti-S-RBD C1q (AU, log10)")
+
+
+par.n_srbd_c1q <- partial(Death, pred.var = c("n_igg_bau_log10", "srbd_c1q_log10"), chull = TRUE,  type = c("classification"), prob = TRUE,  which.class="1")
+plot.n_srbd_c1q <- autoplot(par.n_srbd_c1q, contour = TRUE, legend.title = "Pred Prob", xlab="anti-N IgG (BAU/mL, log10)", ylab="anti-S-RBD C1q (AU, log10)")
+
+par.n_spike_igg <- partial(Death, pred.var = c("n_igg_bau_log10", "spike_igg_bau_log10"), chull = TRUE,  type = c("classification"), prob = TRUE,  which.class="1")
+plot.n_spike_igg <- autoplot(par.n_spike_igg, contour = TRUE, legend.title = "Pred Prob", xlab="anti-N IgG (BAU/mL, log10)", ylab="anti-Spike IgG (BAU/mL, log10)")
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results=FALSE}
+grid.arrange(plot.c1q_n_igg ,plot.c1q_spike_igg , plot.c1q_srbd_c1q, plot.spike_srbd_c1q, plot.n_srbd_c1q, plot.n_spike_igg,  ncol=2)
+
+```
+
+# RF modeling with only serological variables (with OOB method)
+```{r, running the RF with only sero}
+#drop the demographic/clinical measures
+data2 <- data1[,-c(1:10, 16)]
+
+#  default decision trees is 500 
+set.seed(1234) 
+Death_sero <- randomForest(
+ death ~ . , 
+  data=data2, 
+  ntree=2000,
+ method="rf", 
+ importance=TRUE,
+  na.action = na.omit #there cannot be any NA values in any of the predictors 
+)
+
+print(Death_sero) #use OOB error 
+varImpPlot(Death_sero)
+imp <- varImpPlot(Death_sero)
+
+
+c <- confusionMatrix(Death_sero$predicted, data2$death, positive="1")
+print(c)
+
+predictions <- predict(Death_sero, data2)
+predicted_classes <- as.numeric(predictions)
+class_distribution <- table(predicted_classes)
+print(class_distribution)
+oob_predictions_prob <- predict(Death_sero, type = "prob", oob = TRUE)
+
+# Set custom cutoff; default is 0.5
+cutoff <- 0.21
+
+# Convert OOB probabilities to class labels using custom cutoff
+oob_predictions <- apply(oob_predictions_prob, 1, function(x) {
+  ifelse(x["1"] > cutoff, "1", "0")
+})
+
+
+# Convert class labels to factor for calculation
+oob_predictions <- factor(ifelse(oob_predictions == "1", "1", "0"))
+
+true_labels <- data2$death
+conf_matrix <- confusionMatrix(oob_predictions, true_labels, positive="1")
+conf_matrix
+
+F1_Score(oob_predictions,true_labels)
+
+
+# model metrics 
+pred1=predict(Death_sero,type = "prob")
+perf = prediction(pred1[,2], data2$death)
+hist(pred1[,2])
+
+#  1. Area under curve
+performance( perf, 'auc' )
+auc = performance(perf, measure="auc")
+auc
+auc@y.values
+```
+
+
+# RF modeling with only demographic variables (with OOB method)
+```{r, running the RF with only demo}
+data3<- data1[,-c(12:15,17:24)]
+
+#default decision trees is 500 
+set.seed(1234) 
+Death_demo <- randomForest(
+ death ~ . , 
+  data=data3, 
+  ntree=2000,
+ method="rf", 
+ importance=TRUE,
+  na.action = na.omit #there cannot be any NA values in any of the predictors 
+)
+print(Death_demo) #use OOB error 
+varImpPlot(Death_demo)
+imp <- varImpPlot(Death_demo)
+
+
+confusionMatrix(Death_demo$predicted, data3$death, positive="1")
+
+predictions <- predict(Death_demo, data3)
+predicted_classes <- as.numeric(predictions)
+class_distribution <- table(predicted_classes)
+print(class_distribution)
+oob_predictions_prob <- predict(Death_demo, type = "prob", oob = TRUE)
+
+#set custom cutoff; default is 0.5
+cutoff <- 0.21
+
+#convert OOB probabilities to class labels using custom cutoff
+oob_predictions <- apply(oob_predictions_prob, 1, function(x) {
+  ifelse(x["1"] > cutoff, "1", "0")
+})
+
+#convert class labels to factor for calculation
+oob_predictions <- factor(ifelse(oob_predictions == "1", "1", "0"))
+
+true_labels <- data3$death
+conf_matrix <- confusionMatrix(oob_predictions, true_labels, positive="1")
+conf_matrix
+
+F1_Score(oob_predictions,true_labels)
+
+
+#model metrics 
+pred1=predict(Death_demo,type = "prob")
+perf = prediction(pred1[,2], data3$death)
+hist(pred1[,2])
+
+#Area under curve
+performance( perf, 'auc' )
+auc = performance(perf, measure="auc")
+auc
+auc@y.values
+```
+
+
+# Running RF model with k-fold cross-validation 
+```{r}
+#List of factor variables to convert
+factor_vars_to_convert <- c("org_transplant", "cvd", "hiv", "pulmonary", "diabetes", "autoimmune", "cancer", "death", "male")
+
+#Convert numeric levels to "no" and "yes"
+for (var in factor_vars_to_convert) {
+  data1[[var]] <- factor(data1[[var]], levels = c(0, 1), labels = c("no", "yes"))
+}
+
+#Set the parameters of k-fold cross-validation
+set.seed(123)
+folds<- 10
+
+#specify the stratification so that there is balance of the outcome in the folds
+cvIndex <- createFolds(factor(data1$death),  returnTrain = TRUE) 
+
+kfolds <- trainControl(index = cvIndex, method = "cv", number = 10, classProbs=TRUE, summaryFunction = twoClassSummary, savePredictions = TRUE )
+
+# run the RF model 
+set.seed(123)
+rf_cv <- train(death ~., #use all variables to predict death
+            data=data1, #use entire dataset for training  
+            method="rf", 
+            trControl=kfolds, #include repeated cross-validation 
+             metric="ROC")
+print(rf_cv)
+rf_model <- rf_cv$finalModel 
+rf_model
+
+#Plot variable importance
+var_importance <- varImp(rf_cv)
+plot(var_importance)
+
+#Access the performance metrics for each fold
+fold_results <- rf_cv$resample
+fold_results 
+
+#Calculate the average AUC
+average_auc <- mean(fold_results$ROC) 
+average_auc
+```
+
+
+# K-fold cross-validation for death with only serological variables
+```{r}
+#Remove the demographic variables 
+data2 <- data1[,-c(1:10, 16)]
+
+#Set the parameters of your k-fold cross-validation
+set.seed(123)
+
+#specify the stratification so that there is balance of the outcome in the folds
+cvIndex <- createFolds(factor(data2$death),  returnTrain = T) #specify the stratification so that there is balance of the outcome in the folds
+
+kfolds <- trainControl(index = cvIndex, method = "cv", number = 10, classProbs=TRUE, summaryFunction = twoClassSummary, savePredictions = TRUE )
+
+# run the RF model 
+set.seed(123)
+rf_cv_sero <- train(death ~., #use all variables to predict death
+            data=data2, #use entire dataset for training  
+            method="rf", 
+            trControl=kfolds, #include repeated cross-validation 
+             metric="ROC")
+print(rf_cv_sero)
+rf_model <- rf_cv_sero$finalModel 
+rf_model
+
+#Access the performance metrics for each fold
+fold_results <- rf_cv_sero$resample
+fold_results 
+
+#Calculate the average AUC
+average_auc <- mean(fold_results$ROC) 
+average_auc
+```
+
+
+# K-fold cross-validation for death with only demographic variables
+```{r}
+#Remove the serological variables
+data3<- data1[,-c(12:15,17:24)]
+
+#Set the parameters of your k-fold cross-validation
+set.seed(123)
+
+#specify the stratification so that there is balance of the outcome in the folds
+cvIndex <- createFolds(factor(data3$death),  returnTrain = T) 
+
+kfolds <- trainControl(index = cvIndex, method = "cv", number = 10, classProbs=TRUE, summaryFunction = twoClassSummary, savePredictions = TRUE )
+
+#Run the RF model 
+set.seed(123)
+rf_cv_demo <- train(death ~., #use all variables to predict death
+            data=data3, #use entire dataset for training  
+            method="rf", 
+            trControl=kfolds, #include repeated cross-validation 
+             metric="ROC")
+print(rf_cv_demo)
+rf_model <- rf_cv_demo$finalModel 
+rf_model
+
+#Access the performance metrics for each fold
+fold_results <- rf_cv_demo$resample
+fold_results 
+
+#Calculate the average AUC
+average_auc <- mean(fold_results$ROC) 
+average_auc
+```
+

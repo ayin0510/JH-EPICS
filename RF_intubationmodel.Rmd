@@ -1,0 +1,444 @@
+---
+title: "RF_intubationmodel"
+author: "Anna Yin"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+##Running Random Forest modeling on hospitalized data at day 0 (enrollment)
+```{r, loading your packages, message=FALSE, echo=FALSE, results= FALSE}
+# Load in your packages 
+library(tidyverse) #this package includes many of the commonly used packages (e.g., dplyr, ggplot2,tidyr)]
+options(repos = c(CRAN = "https://cran.rstudio.com")) 
+install.packages("pacman") # this package allows you to load several packages in one line 
+library(pacman)
+install.packages("pROC")
+install.packages("pdp")
+install.packages("ROCR")
+p_load(haven, tidyverse,Hmisc, ggpubr,rstatix, randomForest,caTools,varImp,caret,knitr,pROC, shiny, tidymodels,rmarkdown,tidyr, gridExtra, ROCR, pdp)
+```
+
+##Read in clean dta file that only has day 0 data; one subject per row, wide dataset
+```{r, read data in}
+data1<- read_dta("/Users/ayin/Desktop/JH-EPICS/data/Fisher_grant_randomforest_intubation.dta")
+```
+
+```{r, setting up the dataset,  results=FALSE, message=FALSE, echo=FALSE}
+#View the variables in the dataset
+names(data1) 
+
+#drop these to run the intubation model 
+data1 = data1[,-c(11,18, 19, 20, 21, 22, 23, 24, 25, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)]
+
+names(data1) 
+
+dim(data1) # dataset has 99 rows and 24 columns
+
+sapply(data1, class) # to look at how variables are coded (e.g. numeric or double or factor)
+
+#transform variables to factor 
+data1 <- transform(data1,
+                   age=as.integer(age),
+                   male=as.factor(male),
+                   intubation=as.factor(intubation), 
+                   bmi=as.integer(bmi),
+                   race_ethnicity=as.factor(race_ethnicity),
+                   cancer=as.factor(cancer),
+                   cvd=as.factor(cvd),
+                   org_transplant=as.factor(org_transplant),
+                   pulmonary=as.factor(pulmonary),
+                   autoimmune=as.factor(autoimmune),
+                   diabetes=as.factor(diabetes)
+)
+
+#to look at how variables are coded (e.g. numeric or double or factor)
+sapply(data1, class) 
+
+#get rid of na values
+data1 <- data1[!(data1$intubation %in% c(NA)),]
+colSums(is.na(data1))
+na.omit(data1) -> data1 # remove na rows; 98 rows of data for 24 variables
+```
+
+##This is the code for random forest (with OOB method)
+```{r, running the RF}
+#default decision trees is 500 
+set.seed(1234) 
+Intubation <- randomForest(
+ intubation ~ . , 
+  data=data1, 
+  ntree=2000,
+ method="rf", 
+ importance=TRUE,
+  na.action = na.omit #there cannot be any NA values in any of the predictors 
+)
+print(Intubation) #use OOB error 
+varImpPlot(Intubation)
+imp <- varImpPlot(Intubation)
+
+
+##Confusion matrix for default cutoff of 0.5
+confusionMatrix(Intubation$predicted, data1$intubation, positive="1")
+predictions <- predict(Intubation, data1)
+predicted_classes <- as.numeric(predictions)
+
+#Count class distribution
+class_distribution <- table(predicted_classes)
+
+#Display class distribution
+print(class_distribution)
+
+#Obtain out-of-bag (OOB) predictions
+oob_predictions_prob <- predict(Intubation, type = "prob", oob = TRUE)
+
+#Set custom cutoff; default is 0.5
+cutoff <- 0.46
+
+#Convert OOB probabilities to class labels using custom cutoff
+oob_predictions <- apply(oob_predictions_prob, 1, function(x) {
+  ifelse(x["1"] > cutoff, "1", "0")
+})
+
+#Display the first few OOB predictions
+head(oob_predictions)
+
+#Convert class labels to factor for calculation
+oob_predictions <- factor(ifelse(oob_predictions == "1", "1", "0"))
+
+true_labels <- data1$intubation
+conf_matrix <- confusionMatrix(oob_predictions, true_labels, positive="1")
+conf_matrix
+
+F1_Score(oob_predictions,true_labels)
+```
+
+##RF model performance metrics
+```{r,   results=FALSE, message=FALSE, fig.show=FALSE}
+# error rate plots
+Intubation$err.rate[,1]
+par(mfrow = c(2,1))
+plot(Intubation$err.rate[,1], type = "l")
+```
+
+```{r, results=FALSE, message=FALSE}
+# model metrics 
+pred1=predict(Intubation,type = "prob")
+perf = prediction(pred1[,2], data1$intubation)
+hist(pred1[,2])
+```
+
+```{r, message=FALSE}
+#  1. Area under curve
+performance( perf, 'auc' )
+auc = performance(perf, measure="auc")
+auc
+auc@y.values
+```
+
+```{r, results=FALSE, message=FALSE}
+#  2. True Positive and Negative Rate
+pred3 = performance(perf, "tpr","fpr")
+
+#  3. Plot the ROC curve, run the two lines of code together
+plot(pred3,main="ROC Curve for RF Intubation Model",col=2,lwd=2)
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+```
+
+
+## Partial and Bivariate dependence plot to visualize the relationship of variable(s) with outcome 
+```{r, echo = FALSE, results=FALSE, message=FALSE, warning=FALSE, fig.keep="none"}
+#  Single Variable
+partial_spike_c1q <- partial(Intubation, pred.var = c("spike_c1q_log10"),  chull = TRUE, type = c("classification"), prob = TRUE, which.class= "1")
+plot.spike_c1q <- autoplot(partial_spike_c1q, contour = TRUE, xlab="anti-Spike C1q (AU, log10)", ylab="Predicted Probability")
+
+#  Single Variable
+partial_n_igg  <- partial(Intubation, pred.var = c("n_igg_bau_log10"), chull = TRUE, type = c("classification"), prob = TRUE, which.class="1")
+plot.n_igg <- autoplot(partial_n_igg , contour = TRUE, xlab="anti-N-IgG (BAU/mL, log10)", ylab="Predicted Probability")
+
+#  Single Variable
+partial_igg4  <- partial(Intubation, pred.var = c("IgG4AUC_log10"), chull = TRUE, type = c("classification"), prob = TRUE, which.class="1")
+plot.igg4 <- autoplot(partial_igg4 , contour = TRUE, xlab="anti-Spike-IgG4 (AUC, log10)", ylab="Predicted Probability")
+
+
+#  Single Variable
+partial_bmi  <- partial(Intubation, pred.var = c("bmi"), chull = TRUE, type = c("classification"), prob = TRUE, which.class="1")
+plot.bmi  <- autoplot(partial_bmi , contour = TRUE, xlab="BMI", ylab="Predicted Probability")
+```
+
+```{r, echo = FALSE, results=FALSE, message=FALSE, warning=FALSE}
+grid.arrange(plot.spike_c1q , plot.n_igg , plot.bmi, plot.igg4)
+```
+
+
+```{r, echo = FALSE, results=FALSE, message=FALSE, warning=FALSE, fig.keep="none"}
+#  two variable 
+par.c1q_n_igg<- partial(Intubation, pred.var = c("spike_c1q_log10", "n_igg_bau_log10"), chull = TRUE,  type = c("classification"), prob = TRUE, which.class="1")
+plot.c1q_n_igg<- autoplot(par.c1q_n_igg, contour = TRUE, legend.title = "Pred Prob", xlab="anti-Spike C1q (AU, log10)", ylab="anti-N IgG (BAU/mL, log10)")
+
+
+par.c1q_igg4<- partial(Intubation, pred.var = c("spike_c1q_log10", "IgG4AUC_log10"), chull = TRUE,  type = c("classification"), prob = TRUE, which.class="1")
+plot.c1q_igg4<- autoplot(par.c1q_igg4, contour = TRUE, legend.title = "Pred Prob", xlab="anti-Spike C1q (AU, log10)", ylab="anti-Spike IgG4 (AUC, log10)")
+
+par.c1q_bmi <- partial(Intubation, pred.var = c("spike_c1q_log10", "bmi"), chull = TRUE,  type = c("classification"), prob = TRUE, which.class="1")
+plot.c1q_bmi <- autoplot(par.c1q_bmi, contour = TRUE, legend.title = "Pred Prob", xlab="anti-Spike C1q (AU, log10)", ylab="BMI")
+
+par.n_igg4 <- partial(Intubation, pred.var = c("IgG4AUC_log10", "n_igg_bau_log10"), chull = TRUE,  type = c("classification"), prob = TRUE, which.class="1")
+plot.n_igg4 <- autoplot(par.n_igg4, contour = TRUE, legend.title = "Pred Prob", xlab="anti-Spike IgG4 (AUC, log10)", ylab="anti-N IgG (BAU/mL, log10)")
+
+
+par.igg4_bmi <- partial(Intubation, pred.var = c("IgG4AUC_log10", "bmi"), chull = TRUE,  type = c("classification"), prob = TRUE, which.class="1")
+plot.igg4_bmi <- autoplot(par.igg4_bmi, contour = TRUE, legend.title = "Pred Prob", xlab="anti-Spike IgG4 (AUC, log10)", ylab="BMI")
+
+par.n_bmi <- partial(Intubation, pred.var = c("n_igg_bau_log10", "bmi"), chull = TRUE,  type = c("classification"), prob = TRUE, which.class="1")
+plot.n_bmi <- autoplot(par.n_bmi, contour = TRUE, legend.title = "Pred Prob", xlab="anti-N IgG (BAU/mL, log10)", ylab="BMI")
+```
+
+```{r, echo = FALSE, results=FALSE, message=FALSE, warning=FALSE}
+grid.arrange(plot.c1q_n_igg, plot.c1q_igg4 , plot.c1q_bmi, plot.n_igg4, plot.igg4_bmi, plot.n_bmi,  ncol=2)
+```
+
+# RF modeling with only serological variables (with OOB method)
+```{r, running the RF with only sero}
+data2 <- data1[,-c(1:10, 16)] ##drop demographic and clinical variables
+
+#  default decision trees is 500 
+set.seed(1234) 
+Intubation_sero <- randomForest(
+ intubation ~ . , 
+  data=data2, 
+  ntree=2000,
+ method="rf", 
+ importance=TRUE,
+  na.action = na.omit #there cannot be any NA values in any of the predictors 
+)
+
+print(Intubation_sero) #use OOB error 
+varImpPlot(Intubation_sero)
+imp <- varImpPlot(Intubation_sero)
+
+##Confusion matrix for default cutoff of 0.5
+confusionMatrix(Intubation_sero$predicted, data2$intubation, positive="1")
+predictions <- predict(Intubation_sero, data2)
+predicted_classes <- as.numeric(predictions)
+
+#Count class distribution
+class_distribution <- table(predicted_classes)
+
+#Display class distribution
+print(class_distribution)
+
+#Obtain out-of-bag (OOB) predictions
+oob_predictions_prob <- predict(Intubation_sero, type = "prob", oob = TRUE)
+
+#Set custom cutoff; default is 0.5
+cutoff <- 0.46
+
+#Convert OOB probabilities to class labels using custom cutoff
+oob_predictions <- apply(oob_predictions_prob, 1, function(x) {
+  ifelse(x["1"] > cutoff, "1", "0")
+})
+
+#Display the first few OOB predictions
+head(oob_predictions)
+
+#Convert class labels to factor for calculation
+oob_predictions <- factor(ifelse(oob_predictions == "1", "1", "0"))
+
+true_labels <- data2$intubation
+conf_matrix <- confusionMatrix(oob_predictions, true_labels, positive="1")
+conf_matrix
+
+F1_Score(oob_predictions,true_labels)
+
+
+#model metrics 
+pred1=predict(Intubation_sero,type = "prob")
+perf = prediction(pred1[,2], data2$intubation)
+hist(pred1[,2])
+ 
+#Area under curve
+performance( perf, 'auc' )
+auc = performance(perf, measure="auc")
+auc
+auc@y.values
+```
+
+
+#RF modeling with only demographic variables (with OOB method)
+```{r, running the RF with only demo}
+data3<- data1[,-c(12:15,17:24)] #remove the serological variables
+
+# default decision trees is 500 
+set.seed(1234) 
+Intubation_demo <- randomForest(
+ intubation ~ . , 
+  data=data3, 
+  ntree=2000,
+ method="rf", 
+ importance=TRUE,
+  na.action = na.omit #there cannot be any NA values in any of the predictors 
+)
+print(Intubation_demo) #use OOB error 
+varImpPlot(Intubation_demo)
+imp <- varImpPlot(Intubation_demo)
+
+##Confusion matrix for default cutoff of 0.5
+confusionMatrix(Intubation_demo$predicted, data3$intubation, positive="1")
+predictions <- predict(Intubation_demo, data3)
+predicted_classes <- as.numeric(predictions)
+
+#Count class distribution
+class_distribution <- table(predicted_classes)
+
+#Display class distribution
+print(class_distribution)
+
+#Obtain out-of-bag (OOB) predictions
+oob_predictions_prob <- predict(Intubation_demo, type = "prob", oob = TRUE)
+
+#Set custom cutoff; default is 0.5
+cutoff <- 0.46
+
+#Convert OOB probabilities to class labels using custom cutoff
+oob_predictions <- apply(oob_predictions_prob, 1, function(x) {
+  ifelse(x["1"] > cutoff, "1", "0")
+})
+
+#Display the first few OOB predictions
+head(oob_predictions)
+
+# Convert class labels to factor for calculation
+oob_predictions <- factor(ifelse(oob_predictions == "1", "1", "0"))
+
+true_labels <- data3$intubation
+conf_matrix <- confusionMatrix(oob_predictions, true_labels, positive="1")
+conf_matrix
+
+F1_Score(oob_predictions,true_labels)
+
+#model metrics 
+pred1=predict(Intubation_demo,type = "prob")
+perf = prediction(pred1[,2], data3$intubation)
+hist(pred1[,2])
+
+#Area under curve
+performance( perf, 'auc' )
+auc = performance(perf, measure="auc")
+auc
+auc@y.values
+```
+
+#Running RF model with k-fold cross-validation 
+```{r}
+# List of factor variables to convert
+factor_vars_to_convert <- c("org_transplant", "cvd", "hiv", "pulmonary", "diabetes", "autoimmune", "cancer", "intubation", "male")
+
+#Convert numeric levels to "no" and "yes"
+for (var in factor_vars_to_convert) {
+  data1[[var]] <- factor(data1[[var]], levels = c(0, 1), labels = c("no", "yes"))
+}
+
+#Set the parameters of your k-fold cross-validation
+set.seed(123)
+folds<- 10
+
+#specify the stratification so that there is balance of the outcome in the folds
+cvIndex <- createFolds(factor(data1$intubation),  returnTrain = TRUE) 
+
+kfolds <- trainControl(index = cvIndex, method = "cv", number = 10, classProbs=TRUE, summaryFunction = twoClassSummary, savePredictions = TRUE )
+
+
+#run the RF model 
+set.seed(123)
+rf_cv <- train(intubation ~., #use all variables to predict intubation
+            data=data1, #use entire dataset for training  
+            method="rf", 
+            trControl=kfolds, #include repeated cross-validation 
+            metric="F1")
+print(rf_cv)
+rf_model <- rf_cv$finalModel 
+rf_model 
+
+#Plot variable importance
+var_importance <- varImp(rf_cv)
+plot(var_importance)
+
+#Access the performance metrics for each fold
+fold_results <- rf_cv$resample
+fold_results 
+
+#Calculate the average AUC
+average_auc <- mean(fold_results$ROC) 
+average_auc
+```
+
+
+
+# K-fold cross-validation for death with only serological variables
+```{r}
+# remove the demographic variables
+data2 <- data1[,-c(1:10, 16)]
+
+#  Set the parameters of your k-fold cross-validation
+set.seed(123)
+
+#specify the stratification so that there is balance of the outcome in the folds
+cvIndex <- createFolds(factor(data2$intubation),  returnTrain = TRUE) 
+
+kfolds <- trainControl(index = cvIndex, method = "cv", number = 10, classProbs=TRUE, summaryFunction = twoClassSummary, savePredictions = TRUE )
+
+
+#run the RF model 
+set.seed(123)
+rf_cv_sero <- train(intubation ~., #use all variables to predict intubation
+            data=data2, #use entire dataset for training  
+            method="rf", 
+            trControl=kfolds, #include repeated cross-validation 
+             metric="ROC")
+print(rf_cv_sero)
+rf_model <- rf_cv_sero$finalModel 
+rf_model 
+
+#Access the performance metrics for each fold
+fold_results <- rf_cv_sero$resample
+fold_results 
+
+#Calculate the average AUC
+average_auc <- mean(fold_results$ROC) 
+average_auc
+```
+
+
+# K-fold cross-validation for death with only demographic variables
+```{r}
+#remove the serological variables
+data3<- data1[,-c(12:15,17:24)]
+
+#Set the parameters of your k-fold cross-validation
+set.seed(123)
+
+#specify the stratification so that there is balance of the outcome in the folds
+cvIndex <- createFolds(factor(data3$intubation),  returnTrain = TRUE) 
+
+kfolds <- trainControl(index = cvIndex, method = "cv", number = 10, classProbs=TRUE, summaryFunction = twoClassSummary, savePredictions = TRUE )
+
+
+#run the RF model 
+set.seed(123)
+rf_cv_demo <- train(intubation ~., #use all variables to predict intubation
+            data=data3, #use entire dataset for training  
+            method="rf", 
+            trControl=kfolds, #include repeated cross-validation 
+             metric="ROC")
+print(rf_cv_demo)
+rf_model <- rf_cv_demo$finalModel 
+rf_model
+
+#Access the performance metrics for each fold
+fold_results <- rf_cv_demo$resample
+fold_results 
+
+#Calculate the average AUC
+average_auc <- mean(fold_results$ROC) 
+average_auc
+```
